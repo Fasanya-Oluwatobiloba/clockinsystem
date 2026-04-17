@@ -1,18 +1,24 @@
-# 1. Use the official Node.js image
+# 1. Use Node 18
 FROM node:18
 
-# 2. Create and set the app directory
+# 2. Set the timezone to Nigeria
+ENV TZ=Africa/Lagos
+
+# 3. Create app directory
 WORKDIR /usr/src/app
 
-# 3. Copy package files and install dependencies
+# 4. Copy package files
 COPY package*.json ./
-RUN npm install
 
-# 4. Copy the rest of your app code
+# 5. Install dependencies + FULL ICU for locales like en-NG
+RUN npm install
+RUN npm install full-icu
+
+# 6. Copy code
 COPY . .
 
-# 5. Expose the port (Back4app uses 8080 by default, or your process.env.PORT)
+# 7. Expose your port
 EXPOSE 3001
 
-# 6. Start the server
-CMD [ "node", "index.js" ]
+# 8. Start with the ICU data flag so en-NG works correctly
+CMD [ "node", "--icu-data-dir=node_modules/full-icu", "index.js" ]

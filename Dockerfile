@@ -1,22 +1,21 @@
-# 1. Use a standard Node 18 image
-FROM node:18
+# Use a lightweight Node image
+FROM node:18-slim
 
-# 2. Set the working directory
+# Set working directory
 WORKDIR /app
 
-# 3. Copy only package files first to speed up builds
+# Copy package files
 COPY package*.json ./
 
-# 4. Install dependencies (including full-icu for your en-NG dates)
-RUN npm install
-RUN npm install full-icu
+# Install only production dependencies
+RUN npm install --omit=dev
 
-# 5. Copy the rest of your code (including index.js)
+# Copy the index.js and other files
 COPY . .
 
-# 6. Use the port Back4app expects (usually 8080 or what you set in dashboard)
+# Set Port
 ENV PORT=3001
 EXPOSE 3001
 
-# 7. Start the server with ICU data for Nigerian date support
-CMD ["node", "--icu-data-dir=node_modules/full-icu", "index.js"]
+# Standard start command
+CMD ["node", "index.js"]

@@ -1,15 +1,9 @@
 // server/index.js
 // ─────────────────────────────────────────────────────────────
-//  Lightweight Express server — the ESP32 posts here.
-//  This is a THIN PROXY: it validates the API key then
-//  writes the clock-in record directly to Firestore.
-//
-//  Run: node server/index.js
-//  Port: 3001 (React dev server runs on 5173)
+//  MCT Clock-In — Express API Server
+//  Deployed on Railway. Firebase Admin auth uses the
+//  FIREBASE_SERVICE_ACCOUNT env variable (JSON string).
 // ─────────────────────────────────────────────────────────────
-
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
 
 import express from "express";
 import cors from "cors";
@@ -21,26 +15,46 @@ app.use(cors());
 app.use(express.json());
 
 // ── Firebase Admin init ──────────────────────────────────────
-// Uses Application Default Credentials (ADC).
-// For local dev, run:  firebase login  then  firebase use clockinsystem-55c67
-// For production, set GOOGLE_APPLICATION_CREDENTIALS env var to your service account JSON path.
+// On Railway we store the service account JSON as an env var
+// called FIREBASE_SERVICE_ACCOUNT (the full JSON as a string).
 let db;
 try {
-  initializeApp();
+  let serviceAccount;
+
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    // Railway / production: read from env variable
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    console.log("✅ Using FIREBASE_SERVICE_ACCOUNT env variable");
+  } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    // Local fallback: read from file path
+    const fs = await import("fs");
+    serviceAccount = JSON.parse(
+      fs.readFileSync(process.env.GOOGLE_APPLICATION_CREDENTIALS, "utf8")
+    );
+    console.log("✅ Using GOOGLE_APPLICATION_CREDENTIALS file");
+  } else {
+    throw new Error(
+      "No Firebase credentials found.\n" +
+      "Set FIREBASE_SERVICE_ACCOUNT env variable on Railway.\n" +
+      "Or set GOOGLE_APPLICATION_CREDENTIALS to your service account JSON path locally."
+    );
+  }
+
+  initializeApp({ credential: cert(serviceAccount) });
   db = getFirestore();
-  console.log("✅ Firebase Admin connected via ADC");
+  console.log("✅ Firebase Admin connected");
+
 } catch (e) {
   console.error("❌ Firebase Admin init failed:", e.message);
-  console.error("   Run: firebase login && firebase use clockinsystem-55c67");
-  console.error("   Or set GOOGLE_APPLICATION_CREDENTIALS to your service-account.json path");
   process.exit(1);
 }
 
 // ── API Key middleware ────────────────────────────────────────
 async function requireApiKey(req, res, next) {
   const key = req.headers["x-api-key"] || req.query.api_key;
-  if (!key) return res.status(401).json({ success: false, error: "Missing X-Api-Key header" });
-
+  if (!key) {
+    return res.status(401).json({ success: false, error: "Missing X-Api-Key header" });
+  }
   try {
     const snap = await db.collection("api_keys").doc(key).get();
     if (!snap.exists || snap.data().active !== true) {
@@ -52,32 +66,45 @@ async function requireApiKey(req, res, next) {
   }
 }
 
-// ── Health check ─────────────────────────────────────────────
+// ── Health check (no auth needed) ────────────────────────────
 app.get("/api/health", (req, res) => {
-  res.json({ status: "online", project: "MCT Clock-In", timestamp: new Date().toISOString() });
+  res.json({
+    status: "online",
+    project: "MCT Clock-In",
+    timestamp: new Date().toISOString(),
+    message: "Server is running and connected to Firebase"
+  });
 });
 
-// ── POST /api/clockin  (ESP32 → this endpoint) ───────────────
+// ── POST /api/clockin  ← ESP32 posts here ────────────────────
 app.post("/api/clockin", requireApiKey, async (req, res) => {
   const { rfid_uid, device_id = "ESP32", location = "Lab A" } = req.body;
-  if (!rfid_uid) return res.status(400).json({ success: false, error: "rfid_uid required" });
+  if (!rfid_uid) {
+    return res.status(400).json({ success: false, error: "rfid_uid is required" });
+  }
 
   const uid = rfid_uid.toUpperCase();
   const now = new Date();
 
   try {
-    // 1. Lookup student
+    // 1. Look up student
     const studentSnap = await db.collection("students").doc(uid).get();
 
     if (!studentSnap.exists) {
+      // Unknown card — log it
       await db.collection("clockin_logs").add({
-        rfid_uid: uid, status: "UNKNOWN", device_id, location,
+        rfid_uid: uid,
+        status: "UNKNOWN",
+        device_id,
+        location,
         timestamp: FieldValue.serverTimestamp(),
         date: now.toLocaleDateString("en-NG"),
         time: now.toLocaleTimeString("en-NG"),
       });
+      console.log(`[UNKNOWN] Card: ${uid}`);
       return res.json({
-        success: true, status: "UNKNOWN",
+        success: true,
+        status: "UNKNOWN",
         message: "Card not registered",
         display_message: "Unknown Card",
         buzzer: "error",
@@ -86,7 +113,7 @@ app.post("/api/clockin", requireApiKey, async (req, res) => {
 
     const student = studentSnap.data();
 
-    // 2. Duplicate check (last 5 minutes)
+    // 2. Duplicate check — last 5 minutes
     const fiveMinAgo = new Date(now - 5 * 60 * 1000);
     const recentSnap = await db.collection("clockin_logs")
       .where("rfid_uid", "==", uid)
@@ -97,7 +124,8 @@ app.post("/api/clockin", requireApiKey, async (req, res) => {
 
     if (!recentSnap.empty) {
       return res.json({
-        success: true, status: "DUPLICATE",
+        success: true,
+        status: "DUPLICATE",
         message: "Already clocked in recently",
         display_message: `Hi ${student.name.split(" ")[0]}! Already in.`,
         buzzer: "double",
@@ -105,36 +133,45 @@ app.post("/api/clockin", requireApiKey, async (req, res) => {
       });
     }
 
-    // 3. Write successful log
+    // 3. Write successful clock-in
     const logRef = await db.collection("clockin_logs").add({
       rfid_uid: uid,
       status: "SUCCESS",
-      student: { name: student.name, studentId: student.studentId, department: student.department },
-      device_id, location,
+      student: {
+        name:       student.name,
+        studentId:  student.studentId,
+        department: student.department,
+      },
+      device_id,
+      location,
       timestamp: FieldValue.serverTimestamp(),
       date: now.toLocaleDateString("en-NG"),
       time: now.toLocaleTimeString("en-NG"),
     });
 
-    console.log(`[CLOCK-IN] ${student.name} (${uid}) @ ${now.toLocaleTimeString()}`);
+    console.log(`[CLOCK-IN] ✅ ${student.name} (${uid}) @ ${now.toLocaleTimeString()}`);
 
     res.json({
-      success: true, status: "SUCCESS",
-      message: `${student.name} clocked in`,
+      success: true,
+      status: "SUCCESS",
+      message: `${student.name} clocked in successfully`,
       display_message: `Welcome, ${student.name.split(" ")[0]}!`,
       buzzer: "success",
-      student, logId: logRef.id,
+      student,
+      logId: logRef.id,
     });
 
   } catch (e) {
     console.error("Clock-in error:", e);
-    res.status(500).json({ success: false, error: "Server error" });
+    res.status(500).json({ success: false, error: "Server error: " + e.message });
   }
 });
 
+// ── Start server ─────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`\n🎓 MCT Clock-In API Server`);
-  console.log(`📡 http://localhost:${PORT}`);
-  console.log(`🔧 ESP32 should POST to: http://YOUR-IP:${PORT}/api/clockin\n`);
+  console.log(`📡 Running on port ${PORT}`);
+  console.log(`🔧 ESP32 endpoint: POST /api/clockin`);
+  console.log(`💚 Health check:   GET  /api/health\n`);
 });

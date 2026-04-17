@@ -1,24 +1,22 @@
-# 1. Use Node 18
+# 1. Use a standard Node 18 image
 FROM node:18
 
-# 2. Set the timezone to Nigeria
-ENV TZ=Africa/Lagos
+# 2. Set the working directory
+WORKDIR /app
 
-# 3. Create app directory
-WORKDIR /usr/src/app
-
-# 4. Copy package files
+# 3. Copy only package files first to speed up builds
 COPY package*.json ./
 
-# 5. Install dependencies + FULL ICU for locales like en-NG
+# 4. Install dependencies (including full-icu for your en-NG dates)
 RUN npm install
 RUN npm install full-icu
 
-# 6. Copy code
+# 5. Copy the rest of your code (including index.js)
 COPY . .
 
-# 7. Expose your port
+# 6. Use the port Back4app expects (usually 8080 or what you set in dashboard)
+ENV PORT=3001
 EXPOSE 3001
 
-# 8. Start with the ICU data flag so en-NG works correctly
-CMD [ "node", "--icu-data-dir=node_modules/full-icu", "index.js" ]
+# 7. Start the server with ICU data for Nigerian date support
+CMD ["node", "--icu-data-dir=node_modules/full-icu", "index.js"]
